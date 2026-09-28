@@ -42,8 +42,17 @@ claude plugin install agentic@pet-claude --scope project
 ```
 
 Обидві команди пишуть у `<repo>/.claude/settings.json` (`extraKnownMarketplaces` + `enabledPlugins`) —
-закомітити його. Команда для терміналу (одна на машину):
-`ln -s ~/pets/pet-claude/plugins/agentic/bin/agentic ~/.local/bin/agentic`.
+закомітити його.
+
+Команда `agentic` у терміналі — через [direnv](https://direnv.net/), теж на рівні проєкту: `.envrc` у корені
+
+```bash
+# direnv: `agentic` (agentic plugin) on PATH inside this repo. The plugin path comes from
+# the pet-claude marketplace declared in .claude/settings.json. Once: `direnv allow`.
+PATH_add "$(jq -r '.extraKnownMarketplaces["pet-claude"].source.path' .claude/settings.json)/plugins/agentic/bin"
+```
+
+і один раз `direnv allow`. Поза проєктом команди немає. Далі — `agentic init` (див. нижче).
 
 Claude бачить `agentic` у PATH свого Bash (усе з `bin/` плагіна) і skill `/agentic:pipeline`.
 Тому в `bin/` лише одна команда, а внутрішні скрипти — у `libexec/`.
