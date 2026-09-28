@@ -48,10 +48,8 @@ claude plugin install agentic@pet-claude --scope project
 Claude бачить `agentic` у PATH свого Bash (усе з `bin/` плагіна) і skill `/agentic:pipeline`.
 Тому в `bin/` лише одна команда, а внутрішні скрипти — у `libexec/`.
 
-**Дві копії.** Claude Code ставить плагін копією в `~/.claude/plugins/cache/pet-claude/agentic/<version>/`
-(навіть з локального маркетплейсу), а `agentic` у терміналі — симлінк на цей репозиторій, тобто завжди
-свіжий. Щоб правки дійшли до сесій Claude: підняти `version` у `.claude-plugin/plugin.json`, потім
-`claude plugin update agentic@pet-claude` і перезапустити сесію. Без зміни версії `update` нічого не копіює.
+Маркетплейс — локальна тека, тож сесії Claude беруть `bin/` і skills прямо з цього репозиторію:
+правки діють з наступної сесії (або `/reload-plugins`), версію піднімати не треба.
 
 ## Запуск
 
