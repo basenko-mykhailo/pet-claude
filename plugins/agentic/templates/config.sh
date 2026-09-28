@@ -67,7 +67,8 @@ AGENT_BUDGET_USD={{AGENT_BUDGET}} # --max-budget-usd per agent call
 RUN_BUDGET_USD={{RUN_BUDGET}}     # stop picking new tasks once the run has spent this much
 
 # --- Permissions ------------------------------------------------------------
-# On top of the tool's baseline (read-only shell, read-only git, checks, scratch).
+# On top of the tool's baseline (read-only shell, read-only git, reading $PROJECT_BIN, checks, scratch).
+# Every pattern runs without confirmation — allow nothing that can write outside the worktree.
 # Project tools every role may call, e.g. "$PROJECT_BIN/run-tests *":
 AGENT_BASH=(
 )

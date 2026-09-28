@@ -111,6 +111,9 @@ write_settings() {
   local extra
   local ro=(
     "Read" "Glob" "Grep" "WebSearch" "WebFetch"
+    # Lets cat/grep/… read the project tools and scratch dirs, not only the worktree. Read, not
+    # --add-dir: an extra working dir would open $PROJECT_BIN to the implementer's shell writes.
+    "Read(/$PROJECT_BIN/**)" "Read(//tmp/agentic-*/**)"
     "Bash(git diff *)" "Bash(git diff)" "Bash(git status *)" "Bash(git status)"
     "Bash(git log *)" "Bash(git show *)" "Bash(ls *)" "Bash(grep *)" "Bash(wc *)"
     "Bash(cat *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)" "Bash(awk *)"
@@ -123,7 +126,9 @@ write_settings() {
     "Bash(git stash *)" "Bash(git switch *)" "Bash(git rebase *)"
   )
   for extra in "${DENY_BASH[@]}"; do deny+=("Bash($extra)"); done
-  local impl=("${ro[@]}" "Edit" "Write" "Write(//tmp/agentic-*/**)" "Edit(//tmp/agentic-*/**)")
+  # acceptEdits already covers the worktree. No bare Edit/Write: they would allow edits anywhere
+  # outside it too, e.g. to $PROJECT_BIN wrappers that agents run without confirmation.
+  local impl=("${ro[@]}" "Write(//tmp/agentic-*/**)" "Edit(//tmp/agentic-*/**)")
   for extra in "${IMPLEMENTER_EXTRA_BASH[@]}"; do impl+=("Bash($extra)"); done
   local val=("${ro[@]}")
   for extra in "${VALIDATOR_EXTRA_BASH[@]}"; do val+=("Bash($extra)"); done
@@ -176,25 +181,15 @@ standing_criteria() {
   sed '1{/^# /d}' "$STANDING_CRITERIA"
 }
 
-# Project context (config AGENT_CONTEXT) + the pipeline's own rules for agents.
+# Project context (config AGENT_CONTEXT) + the pipeline's own rules for agents (prompts/rules.md,
+# which must match what write_settings allows).
 tools_hint() {
   if [[ -n ${AGENT_CONTEXT:-} && -f $AGENT_CONTEXT ]]; then
     sed "s#{{PROJECT_BIN}}#$PROJECT_BIN#g" "$AGENT_CONTEXT"
     echo
   fi
-  cat <<EOF
-## Pipeline rules
-
-- Write everything meant for humans (summaries, user-facing text) in $LANGUAGE.
-- Full quality gate: \`$BIN/checks\` — run it before you finish.
-- Scratch files never go in the worktree (everything in it gets committed). Get a dir with
-  \`$BIN/scratch new <name>\` (prints \`/tmp/agentic-<name>-XXXXXX\`) and create files in it with the
-  **Write tool** (implementer). Don't clean up — the pipeline removes /tmp/agentic-* dirs and
-  agentic-* docker images after every task.
-- Permission rules match one plain command per Bash call. Compound commands (\`cd … && …\`, \`;\`),
-  \`\$(…)\` in paths, shell redirects to files and \`git -C\` are denied — you are already in the
-  worktree, so run git and scripts directly and use the Edit/Write tools for files.
-EOF
+  sed -e "s#{{LANGUAGE}}#$LANGUAGE#g" -e "s#{{BIN}}#$BIN#g" -e "s#{{PROJECT_BIN}}#$PROJECT_BIN#g" \
+    "$AGENTIC_DIR/prompts/rules.md"
 }
 
 # ---------------------------------------------------------------------------

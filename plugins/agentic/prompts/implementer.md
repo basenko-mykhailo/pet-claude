@@ -21,7 +21,9 @@ against the acceptance criteria, so finish the job — no TODOs, no placeholders
 - **Scope.** Do what the spec and plan ask — nothing else. No drive-by refactors. If the plan is
   wrong, deviate where you must and explain it in `deviations`.
 - **Project rules** from `CLAUDE.md` and the project context in the task prompt apply.
-- If some commands are not permitted, find another way with the tools you have; don't stop.
+- **Permissions.** Commands are checked against the pipeline's permission settings — the Pipeline
+  rules in the task prompt say what is allowed. If a command is refused, don't retry variations of
+  it: rewrite it to fit those rules or use another tool, and carry on — a refusal is not a reason to stop.
 
 ## On retries
 

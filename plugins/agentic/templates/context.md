@@ -13,7 +13,8 @@
 
 <!-- Як агенту запускати тести, збірку, застосунок САМЕ у worktree (не у вашому
      робочому checkout). Якщо потрібні обгортки — покладіть скрипти в .claude/agentic/bin/
-     і дозвольте їх в AGENT_BASH у config.sh. -->
+     і дозвольте їх в AGENT_BASH у config.sh. Опишіть тут кожну: що робить, аргументи,
+     середовище (що монтує, які змінні) — прочитати скрипт агенти можуть, але це зайві кроки. -->
 - Full quality gate: the `checks` script from the pipeline rules below.
 
 ### Project rules agents must follow and check

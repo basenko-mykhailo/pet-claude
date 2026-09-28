@@ -19,6 +19,7 @@ plugins/agentic/                  ← інструмент (Claude Code plugin, 
   lib/taskq.py                    ← черга: front-matter у специфікаціях + рядок у progress-лозі
   lib/watch.py                    ← live-перегляд прогону
   prompts/*.md, schemas/*.json    ← ролі й структуровані відповіді
+  prompts/rules.md                ← правила пайплайна для всіх ролей (дозволи Bash тощо)
   templates/                      ← шаблони config.sh і context.md для init
   skills/pipeline/SKILL.md        ← /agentic:pipeline — щоб Claude вмів керувати конвеєром
   skills/tasks/SKILL.md           ← /agentic:tasks — ТЗ → епіки й специфікації задач
@@ -138,13 +139,30 @@ agentic»). Спершу питання й рішення, яких ТЗ не д
 🟡 = зроблено й провалідовано, але є пункти для ручної перевірки.
 
 Промпт кожного агента = роль (`prompts/`) + специфікація + постійні критерії (`STANDING_CRITERIA`)
-+ контекст проєкту (`context.md`) + правила пайплайна.
++ контекст проєкту (`context.md`) + правила пайплайна (`prompts/rules.md`).
+
+## Дозволи агентів
+
+`write_settings` у `libexec/pipeline` на старті прогону пише `runs/<id>/settings-<роль>.json`. Підтверджувати
+нікому, тож усе, що не дозволено, агент отримує як відмову (`permission_denials` у `*.result.json`, ⚠ у
+`agentic watch`). Як працювати в цих рамках, агентам пояснює `prompts/rules.md` — правити його разом
+із `write_settings`.
+
+- **Читання** (усі ролі): інструмент Read — будь-де; shell (`cat`, `grep`, `sed -n`…) — worktree,
+  `$PROJECT_BIN` і `/tmp/agentic-*`.
+- **Запис** (лише implementer): Edit/Write — worktree (`acceptEdits`) і `/tmp/agentic-*`. Голих `Edit`/`Write`
+  в allow немає навмисно: вони пускали б правки будь-куди поза worktree, зокрема в обгортки `$PROJECT_BIN`,
+  які агенти запускають без підтвердження. З тієї ж причини `$PROJECT_BIN` відкрито правилом `Read(…)`, а не
+  `--add-dir`: робочу теку `acceptEdits` відкрив би й для запису з shell (`sed -i`, `>`, `mkdir`).
+- **Bash**: базовий набір (read-only shell і git, `checks`, `scratch`) + `AGENT_BASH` і `*_EXTRA_BASH` з конфігу,
+  мінус `DENY_BASH`. Кожен такий шаблон виконується без підтвердження — додавайте лише те, що не пише за
+  межі worktree.
 
 ## Відомі обмеження
 
 - Послідовно, одна гілка на епік; гілка не ребейзиться на свіжий `BASE_BRANCH`.
-- Конфіг і allowlist фіксуються на старті прогону; промпти ролей і `STANDING_CRITERIA`
-  читаються на кожен виклик агента. Правити `libexec/pipeline` посеред прогону — лише атомарно
+- Конфіг і allowlist фіксуються на старті прогону; промпти ролей, `prompts/rules.md` і
+  `STANDING_CRITERIA` читаються на кожен виклик агента. Правити `libexec/pipeline` посеред прогону — лише атомарно
   (новий файл + `mv`), bash дочитує скрипт з диска.
 
 ## Далі (v2)
