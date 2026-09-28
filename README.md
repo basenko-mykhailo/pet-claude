@@ -6,10 +6,12 @@ Claude Code plugin marketplace for personal pet projects.
 |---|---|
 | [`agentic`](plugins/agentic/README.md) | Autonomous task-queue pipeline: planner → implementer → checks → validator → commit, in an isolated git worktree. |
 
+Plugins are installed **per project**, not per user — from the project root:
+
 ```bash
-claude plugin marketplace add ~/pets/pet-claude
-claude plugin install agentic@pet-claude
-claude plugin validate ~/pets/pet-claude     # after editing manifests
+claude plugin marketplace add ~/pets/pet-claude --scope project
+claude plugin install agentic@pet-claude --scope project   # → <repo>/.claude/settings.json, commit it
+claude plugin validate ~/pets/pet-claude                   # after editing manifests
 ```
 
 A plugin lives in `plugins/<name>/` with `.claude-plugin/plugin.json` and is listed in

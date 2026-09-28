@@ -31,15 +31,19 @@ plugins/agentic/                  ← інструмент (Claude Code plugin, 
 
 Проєкт знаходиться через `$AGENTIC_PROJECT` або `<git root>/.claude/agentic` — запускати з репозиторію.
 
-## Встановлення (один раз на машині)
+## Встановлення (у кожен проєкт окремо)
 
-Плагін живе в маркетплейсі `pet-claude` (цей репозиторій).
+Плагін живе в маркетплейсі `pet-claude` (цей репозиторій) і ставиться **на рівні проєкту** —
+не для користувача. З кореня проєкту:
 
 ```bash
-claude plugin marketplace add ~/pets/pet-claude
-claude plugin install agentic@pet-claude                # user scope: у всіх проєктах
-ln -s ~/pets/pet-claude/plugins/agentic/bin/agentic ~/.local/bin/agentic   # команда для терміналу
+claude plugin marketplace add ~/pets/pet-claude --scope project
+claude plugin install agentic@pet-claude --scope project
 ```
+
+Обидві команди пишуть у `<repo>/.claude/settings.json` (`extraKnownMarketplaces` + `enabledPlugins`) —
+закомітити його. Команда для терміналу (одна на машину):
+`ln -s ~/pets/pet-claude/plugins/agentic/bin/agentic ~/.local/bin/agentic`.
 
 Claude бачить `agentic` у PATH свого Bash (усе з `bin/` плагіна) і skill `/agentic:pipeline`.
 Тому в `bin/` лише одна команда, а внутрішні скрипти — у `libexec/`.
