@@ -16,6 +16,7 @@ description: Drive the agentic pipeline — the autonomous task-queue runner (pl
 | Put a needs-human task back to todo | `agentic retry --epic N --only N.M` |
 | Live view of the current run | `agentic watch --epic N` |
 | Set up a new project | `agentic init` (interactive) |
+| Write task specs from a project spec (ТЗ) | the `tasks` skill |
 
 - **`run` takes hours** and spawns its own `claude -p` agents. Start it detached — Bash with
   `run_in_background`, or `nohup agentic run --epic N >/dev/null 2>&1 &` — and don't wait on it. Progress:

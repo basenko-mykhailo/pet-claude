@@ -21,6 +21,7 @@ plugins/agentic/                  ← інструмент (Claude Code plugin, 
   prompts/*.md, schemas/*.json    ← ролі й структуровані відповіді
   templates/                      ← шаблони config.sh і context.md для init
   skills/pipeline/SKILL.md        ← /agentic:pipeline — щоб Claude вмів керувати конвеєром
+  skills/tasks/SKILL.md           ← /agentic:tasks — ТЗ → епіки й специфікації задач
 
 <repo>/.claude/agentic/           ← проєкт
   config.sh                       ← черга, гілки, CHECKS, project_setup, дозволи, мова, тексти
@@ -54,7 +55,7 @@ PATH_add "$(jq -r '.extraKnownMarketplaces["pet-claude"].source.path' .claude/se
 
 і один раз `direnv allow`. Поза проєктом команди немає. Далі — `agentic init` (див. нижче).
 
-Claude бачить `agentic` у PATH свого Bash (усе з `bin/` плагіна) і skill `/agentic:pipeline`.
+Claude бачить `agentic` у PATH свого Bash (усе з `bin/` плагіна) і skills `/agentic:pipeline`, `/agentic:tasks`.
 Тому в `bin/` лише одна команда, а внутрішні скрипти — у `libexec/`.
 
 Маркетплейс — локальна тека, тож сесії Claude беруть `bin/` і skills прямо з цього репозиторію:
@@ -115,6 +116,10 @@ depends_on: [6.1]
 ```
 
 закомічені в `BASE_BRANCH` (worktree створюється з нього). Перевірка: `agentic status --epic N`.
+
+Специфікації з ТЗ готує Claude: `/agentic:tasks docs/spec.md` (або просто «розбий ТЗ на задачі для
+agentic»). Спершу питання й рішення, яких ТЗ не дає, потім розбивка на епіки й задачі на погодження,
+і лише тоді файли задач, журнал прогресу й постійні критерії.
 
 ## Як проходить задача
 
