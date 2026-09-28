@@ -1,0 +1,16 @@
+{
+  "name": "pet-claude",
+  "owner": {
+    "name": "Mykhailo Basenko"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for personal pet projects."
+  },
+  "plugins": [
+    {
+      "name": "agentic",
+      "source": "./plugins/agentic",
+      "description": "Autonomous task-queue pipeline: planner → implementer → checks → independent validator → commit, one fresh claude -p per role, in an isolated git worktree."
+    }
+  ]
+}

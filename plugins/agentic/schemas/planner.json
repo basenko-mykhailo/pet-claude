@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["ok", "needs_human"]},
+    "plan": {"type": "string", "description": "Full implementation plan in Markdown"},
+    "manual_checks": {"type": "array", "items": {"type": "string"}, "description": "AC that cannot be verified autonomously"},
+    "reason": {"type": "string", "description": "Why a human is needed (status=needs_human)"}
+  },
+  "required": ["status", "plan"]
+}

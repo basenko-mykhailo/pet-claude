@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Scratch space for agents outside the worktree (everything inside it gets committed).
+#   scratch new [name]  → creates and prints a fresh /tmp/agentic-<name>-XXXXXX dir
+#   scratch clean       → removes this user's /tmp/agentic-* dirs and agentic-* docker images
+# The pipeline runs `scratch clean` after every task, so agents never need rm.
+set -euo pipefail
+
+case ${1:-} in
+  new)
+    name=${2:-scratch}
+    mktemp -d "/tmp/agentic-${name//[^a-zA-Z0-9-]/}-XXXXXX"
+    ;;
+  clean)
+    find /tmp -maxdepth 1 -name 'agentic-*' -user "$(id -u)" -exec rm -rf {} +
+    docker images --format '{{.Repository}}:{{.Tag}}' | grep '^agentic-' | xargs -r docker rmi -f >/dev/null
+    ;;
+  *)
+    echo "usage: scratch new [name] | scratch clean" >&2
+    exit 2
+    ;;
+esac

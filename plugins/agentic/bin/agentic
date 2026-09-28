@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The only command the plugin puts on PATH (Claude's Bash tool; ~/.local/bin/agentic for
+# the terminal). Internal scripts live in libexec/ so generic names like `checks` stay off PATH.
+exec "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../libexec/pipeline" "$@"

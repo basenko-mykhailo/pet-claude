@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# Set up the agentic pipeline for the current repository: a short interview
+# (in Ukrainian, with explanations) that writes .claude/agentic/config.sh and
+# context.md from templates/ of the plugin. Never overwrites an existing config.
+#
+#   agentic init          # interview
+#   agentic init --yes    # accept every default (no questions)
+set -euo pipefail
+
+AGENTIC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+TEMPLATES="$AGENTIC_DIR/templates"
+YES=0
+[[ ${1:-} == --yes || ${1:-} == -y ]] && YES=1
+
+REPO=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "Запустіть з git-репозиторію проєкту." >&2; exit 1; }
+PROJECT_DIR="$REPO/.claude/agentic"
+if [[ -f $PROJECT_DIR/config.sh ]]; then
+  echo "Конфіг уже є: ${PROJECT_DIR#"$REPO"/}/config.sh — нічого не змінюю."
+  echo "Щоб налаштувати заново, видаліть або перейменуйте його."
+  exit 0
+fi
+
+if [[ -t 1 ]]; then B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' R=$'\e[0m'; else B="" D="" G="" R=""; fi
+
+# ask VAR "Питання" "default" "пояснення…" — the answer goes into VAR.
+ask() {
+  local var=$1 question=$2 default=$3 help=$4 answer
+  echo
+  echo "${D}${help}${R}"
+  if (( YES )); then
+    answer=$default
+    echo "${B}${question}${R} ${default}"
+  else
+    read -r -p "${B}${question}${R} [${default}]: " answer || true
+    answer=${answer:-$default}
+  fi
+  printf -v "$var" '%s' "$answer"
+}
+
+yes_no() { [[ ${1,,} =~ ^(т|так|y|yes|1|true)$ ]]; }
+
+# ask_list VAR "Питання" "пояснення" default… — one item per line, empty line ends.
+ask_list() {
+  local var=$1 question=$2 help=$3; shift 3
+  local -a defaults=("$@") items=() line
+  echo
+  echo "${D}${help}${R}"
+  echo "${B}${question}${R}"
+  if (( ${#defaults[@]} )); then
+    printf '  %s\n' "${defaults[@]}"
+  else
+    echo "  (нічого не знайдено)"
+  fi
+  if (( ! YES )); then
+    echo "${D}Enter — прийняти список вище, або введіть свої рядки по одному; порожній рядок — кінець.${R}"
+    while read -r -p "> " line && [[ -n $line ]]; do items+=("$line"); done || true
+  fi
+  (( ${#items[@]} )) || items=("${defaults[@]}")
+  local joined=""
+  for line in "${items[@]}"; do joined+="$line"$'\n'; done
+  printf -v "$var" '%s' "$joined"
+}
+
+# --- Defaults detected from the repository ------------------------------------
+cd "$REPO"
+base=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##') \
+  || base=$(git branch --show-current 2>/dev/null)
+base=${base:-main}
+if [[ -d docs/tickets ]]; then
+  tasks_default='docs/tickets/epic-${EPIC}/task-*.md' progress_default=docs/tickets/implementations_progress.md
+  criteria_default=docs/tickets/criteria.md
+else
+  tasks_default='tasks/epic-${EPIC}/task-*.md' progress_default=tasks/progress.md criteria_default=tasks/criteria.md
+fi
+checks_default=()
+[[ -f composer.json ]] && grep -q '"test"' composer.json && checks_default+=("composer test")
+[[ -f package.json ]] && grep -q '"test"' package.json && checks_default+=("npm test")
+[[ -f Makefile ]] && grep -qE '^test:' Makefile && checks_default+=("make test")
+[[ -f pyproject.toml || -f pytest.ini ]] && checks_default+=("pytest -q")
+[[ -f go.mod ]] && checks_default+=("go test ./...")
+[[ -f Cargo.toml ]] && checks_default+=("cargo test")
+docs_default=()
+for f in README.md docs/*.md; do [[ -f $f ]] && docs_default+=("$f"); done
+docs_default=("${docs_default[@]:0:5}")
+tg_default=ні
+[[ -f $HOME/.config/agentic/telegram.env ]] && tg_default=так
+
+# --- Interview -------------------------------------------------------------------
+echo "${B}Налаштування agentic pipeline для $(basename "$REPO")${R}"
+echo "${D}Конвеєр бере задачі з черги й проводить кожну через planner → implementer → перевірки →"
+echo "незалежний validator → коміт. Нижче — кілька питань; Enter приймає значення в [дужках].${R}"
+
+ask PROJECT_NAME "Назва проєкту:" "$(basename "$REPO")" \
+  "Коротка назва — стоїть на початку кожного сповіщення, щоб розрізняти проєкти."
+ask PROJECT_ABOUT "Одним рядком — що це за проєкт:" "опис проєкту" \
+  "Потрапляє в контекст кожного агента: стек і призначення (напр. «Laravel 13 API для магазину»)."
+ask LANGUAGE "Мова текстів для людей (English/Ukrainian/…):" "Ukrainian" \
+  "Мовою проєкту агенти пишуть підсумки, рядки в журналі прогресу й тексти для користувачів."
+ask TASKS_GLOB "Де лежать специфікації задач (glob):" "$tasks_default" \
+  "Кожна задача — Markdown-файл з front-matter (id, status, depends_on). \${EPIC} підставляється з --epic."
+ask PROGRESS_FILE "Журнал прогресу для людей:" "$progress_default" \
+  "Markdown-файл, де конвеєр оновлює рядок задачі: ✅ зроблено, 🟡 є що перевірити руками, 🛑 потрібна людина."
+ask CRITERIA "Постійні критерії приймання (файл, або «-» якщо не треба):" "$criteria_default" \
+  "Правила, що діють для КОЖНОЇ задачі (напр. «нейтральна лексика», «без нових залежностей»). Validator перевіряє їх окремо."
+ask BASE_BRANCH "Базова гілка:" "$base" \
+  "З неї створюється робоча гілка auto/epic-N в окремому worktree; ваша робоча тека не зачіпається."
+ask OPEN_PR_ANSWER "Пушити гілку після кожної задачі й відкривати PR? (так/ні)" "так" \
+  "Прогрес видно на GitHub; PR створюється через gh (потрібен gh auth login). «ні» — лише локальні коміти."
+ask_list CHECKS_LIST "Команди перевірок (gate після кожної спроби):" \
+  "Запускаються з кореня worktree; усі мають пройти, інакше implementer отримує вивід як фідбек. Якщо проєкт працює в Docker — потрібна обгортка в .claude/agentic/bin/, яка запускає команду проти worktree." \
+  "${checks_default[@]}"
+ask_list DOCS_LIST "Документи, які агенти мають прочитати перед роботою:" \
+  "Специфікації, гайди стилю, архітектурні нотатки. CLAUDE.md агенти читають автоматично." \
+  "${docs_default[@]}"
+ask TG_ANSWER "Сповіщення в Telegram? (так/ні)" "$tg_default" \
+  "Старт, кожна задача (✅/🟡/🛑 з часом і вартістю), збої й підсумок. Облікові дані спільні для всіх проєктів: agentic telegram --setup <токен>."
+ask AGENT_BUDGET "Бюджет на один виклик агента, \$:" "15" \
+  "Жорсткий ліміт --max-budget-usd для planner/implementer/validator."
+ask RUN_BUDGET "Бюджет на весь прогін, \$:" "150" \
+  "Після цієї суми конвеєр не бере нових задач (поточну доробляє)."
+
+# --- Render templates ---------------------------------------------------------------
+open_pr=0; yes_no "$OPEN_PR_ANSWER" && open_pr=1
+criteria=""; [[ $CRITERIA != - && -n $CRITERIA ]] && criteria="\$REPO/$CRITERIA"
+notify='NOTIFY_CMD=("$AGENTIC_DIR/libexec/notify-telegram")'
+yes_no "$TG_ANSWER" || notify="# $notify"
+checks=""
+while IFS= read -r line; do [[ -n $line ]] && checks+="  \"${line//\"/\\\"}\""$'\n'; done <<<"$CHECKS_LIST"
+checks=${checks%$'\n'}
+docs=""
+while IFS= read -r line; do [[ -n $line ]] && docs+="- \`$line\`"$'\n'; done <<<"$DOCS_LIST"
+docs=${docs%$'\n'}
+if [[ ${LANGUAGE,,} == ukrainian ]]; then
+  messages='MSG_SPEC="Спека"
+MSG_MANUAL="Ручна перевірка"
+MSG_NEEDS_HUMAN="потрібне ручне втручання"
+MSG_LOGS="логи й патч останньої спроби"
+MSG_RETRY="не почато (повторна спроба)."
+PR_TITLE="Epic ${EPIC}: автоматична реалізація"
+PR_INTRO="Автоматична реалізація епіку ${EPIC}: кожна задача — окремий коміт (planner → implementer → checks → незалежний validator)."'
+else
+  messages='# English defaults are built in; override MSG_SPEC, MSG_MANUAL, MSG_NEEDS_HUMAN,
+# MSG_LOGS, MSG_RETRY, PR_TITLE, PR_INTRO here for another language.'
+fi
+
+render() {
+  local text; text=$(<"$1")
+  text=${text//"{{PROJECT_NAME}}"/$PROJECT_NAME}
+  text=${text//"{{PROJECT_ABOUT}}"/$PROJECT_ABOUT}
+  text=${text//"{{TASKS_GLOB}}"/$TASKS_GLOB}
+  text=${text//"{{PROGRESS_FILE}}"/$PROGRESS_FILE}
+  text=${text//"{{STANDING_CRITERIA}}"/$criteria}
+  text=${text//"{{LANGUAGE}}"/$LANGUAGE}
+  text=${text//"{{BASE_BRANCH}}"/$BASE_BRANCH}
+  text=${text//"{{OPEN_PR}}"/$open_pr}
+  text=${text//"{{NOTIFY_LINE}}"/$notify}
+  text=${text//"{{CHECKS}}"/$checks}
+  text=${text//"{{AGENT_BUDGET}}"/$AGENT_BUDGET}
+  text=${text//"{{RUN_BUDGET}}"/$RUN_BUDGET}
+  text=${text//"{{MESSAGES}}"/$messages}
+  text=${text//"{{DOCS}}"/$docs}
+  printf '%s\n' "$text"
+}
+
+mkdir -p "$PROJECT_DIR/bin"
+render "$TEMPLATES/config.sh" >"$PROJECT_DIR/config.sh"
+render "$TEMPLATES/context.md" >"$PROJECT_DIR/context.md"
+bash -n "$PROJECT_DIR/config.sh"
+
+if [[ -n $criteria && ! -f $REPO/$CRITERIA ]]; then
+  mkdir -p "$(dirname "$REPO/$CRITERIA")"
+  printf '# Постійні критерії приймання\n\nДіють для кожної задачі на додачу до AC зі специфікації.\n' >"$REPO/$CRITERIA"
+fi
+if ! grep -qxF '.claude/agentic/runs/' "$REPO/.gitignore" 2>/dev/null; then
+  printf '\n# Agentic pipeline run logs\n.claude/agentic/runs/\n' >>"$REPO/.gitignore"
+fi
+
+cat <<EOF
+
+${G}Готово.${R} Створено:
+  .claude/agentic/config.sh    — налаштування конвеєра
+  .claude/agentic/context.md   — що агенти мають знати про проєкт
+  .claude/agentic/bin/         — сюди ваші обгортки для тестів/запуску у worktree
+$([[ -n $criteria ]] && echo "  $CRITERIA  — постійні критерії")
+
+${B}Що доробити руками:${R}
+  1. context.md — як запускати тести й застосунок у worktree, правила проєкту.
+  2. config.sh → project_setup() — встановлення залежностей у свіжому worktree.
+  3. Специфікації задач з front-matter (id, status: todo, depends_on) за шаблоном
+     $TASKS_GLOB — і закомітити їх у $BASE_BRANCH.
+$(yes_no "$TG_ANSWER" && [[ ! -f $HOME/.config/agentic/telegram.env ]] && echo "  4. Telegram: agentic telegram --setup <токен від @BotFather>")
+
+Перевірка: agentic status --epic <N>
+EOF

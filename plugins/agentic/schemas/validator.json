@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fail", "needs_human"]},
+    "ac_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ac": {"type": "string"},
+          "status": {"type": "string", "enum": ["met", "not_met", "manual"]},
+          "evidence": {"type": "string"}
+        },
+        "required": ["ac", "status", "evidence"]
+      }
+    },
+    "feedback": {"type": "string", "description": "Actionable fixes for the implementer (file:line, what to change). Empty on pass."},
+    "manual_checks": {"type": "array", "items": {"type": "string"}},
+    "reason": {"type": "string", "description": "Why a human is needed (verdict=needs_human)"}
+  },
+  "required": ["verdict", "ac_results", "feedback"]
+}

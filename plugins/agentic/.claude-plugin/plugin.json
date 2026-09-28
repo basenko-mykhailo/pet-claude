@@ -1,0 +1,10 @@
+{
+  "name": "agentic",
+  "version": "0.1.0",
+  "description": "Autonomous task-queue pipeline: planner → implementer → checks → independent validator → commit. Project config lives in <repo>/.claude/agentic/.",
+  "author": {
+    "name": "Mykhailo Basenko"
+  },
+  "license": "UNLICENSED",
+  "keywords": ["pipeline", "autonomous", "worktree", "task-queue"]
+}

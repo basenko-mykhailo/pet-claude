@@ -1,0 +1,11 @@
+{
+  "type": "object",
+  "properties": {
+    "status": {"type": "string", "enum": ["done", "needs_human"]},
+    "summary": {"type": "string", "description": "One paragraph for the progress log, in the language named in the task prompt: what changed, where, which checks pass"},
+    "deviations": {"type": "string", "description": "Where and why you deviated from the plan, or empty"},
+    "manual_checks": {"type": "array", "items": {"type": "string"}},
+    "reason": {"type": "string", "description": "Why a human is needed (status=needs_human)"}
+  },
+  "required": ["status", "summary"]
+}

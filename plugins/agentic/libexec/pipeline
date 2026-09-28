@@ -1,0 +1,538 @@
+#!/usr/bin/env bash
+# Agentic pipeline: planner → implementer → validator → committer over a file-backed
+# task queue. Every agent is a fresh `claude -p` session; agents only talk to each
+# other through files and structured JSON. Git and queue state are owned by this script.
+# Project-specific settings: <repo>/.claude/agentic/ (see lib/project.sh). Run from the repo.
+#   agentic init                           # set up .claude/agentic (interview)
+#   agentic run    --epic 6 [--only 6.3] [--max-tasks N] [--no-pr]
+#   agentic status --epic 6
+#   agentic watch  --epic 6                # live view of the latest run
+#   agentic retry  --epic 6 --only 6.7     # needs-human → todo
+#   agentic telegram --setup <bot token>   # one-time, shared by all projects
+# `agentic` is bin/agentic of the plugin, which execs this file (see README).
+set -euo pipefail
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+usage() {
+  sed -n '6,11p' "$SELF" | sed 's/^# \{0,1\}//'
+  exit 2
+}
+die() { echo "pipeline: $*" >&2; exit 1; }
+log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+# These run without a project config.
+[[ ${1:-} == init ]] && exec "$(dirname "$SELF")/init" "${@:2}"
+[[ ${1:-} == telegram ]] && { [[ -n ${2:-} ]] || usage; exec "$(dirname "$SELF")/notify-telegram" "${@:2}"; }
+
+CMD=${1:-}; shift || true
+EPIC="" ONLY="" MAX_TASKS=0 NO_PR=0
+while (( $# )); do
+  case $1 in
+    --epic) EPIC=$2; shift 2 ;;
+    --only) ONLY=$2; shift 2 ;;
+    --max-tasks) MAX_TASKS=$2; shift 2 ;;
+    --no-pr) NO_PR=1; shift ;;
+    -h|--help) usage ;;
+    *) die "unknown argument: $1" ;;
+  esac
+done
+[[ -n $CMD && -n $EPIC ]] || usage
+
+export EPIC
+# shellcheck source=../lib/project.sh
+source "$(dirname "$SELF")/../lib/project.sh"
+RUNS_DIR="$PROJECT_DIR/runs"
+WT="$WORKTREE_DIR"
+export AGENTIC_WT="$WT"
+
+# Texts written into the progress log / PR; the project config overrides them.
+: "${LANGUAGE:=English}"
+: "${MSG_SPEC:=Spec}" "${MSG_MANUAL:=Manual check}" "${MSG_NEEDS_HUMAN:=needs a human}"
+: "${MSG_LOGS:=logs and patch of the last attempt}" "${MSG_RETRY:=not started (retry).}"
+: "${PR_TITLE:=Epic $EPIC: automated implementation}"
+: "${PROJECT_NAME:=$(basename "$REPO")}" "${PUSH_EACH_TASK:=1}"
+: "${PR_INTRO:=Automated implementation of epic $EPIC: one commit per task (planner → implementer → checks → independent validator).}"
+
+q() { python3 "$AGENTIC_DIR/lib/taskq.py" --root "$WT" --glob "$TASKS_GLOB" "$@"; }
+progress() { q progress "$1" "$2" "$3" --file "$PROGRESS_FILE" --spec-label "$MSG_SPEC"; }
+
+# Tell the human (config NOTIFY_CMD, e.g. libexec/notify-telegram). Never fails the run.
+notify() {
+  [[ -n ${NOTIFY_CMD+x} && ${#NOTIFY_CMD[@]} -gt 0 ]] || return 0
+  timeout 30 "${NOTIFY_CMD[@]}" "[$PROJECT_NAME] $1" >/dev/null 2>&1 || log "! notify failed"
+}
+
+# https://github.com/<owner>/<repo> from the origin remote (ssh host aliases included).
+web_url() {
+  local url; url=$(git -C "$REPO" remote get-url origin 2>/dev/null) || return 0
+  [[ $url =~ github[^:/]*[:/]([^/]+/[^/]+)$ ]] && echo "https://github.com/${BASH_REMATCH[1]%.git}"
+}
+
+# "12m, $2.40" for the current task.
+task_stats() {
+  local cost
+  cost=$(cat "$TASK_RUN"/*.result.json 2>/dev/null | jq -s '[.[].total_cost_usd // 0] | add // 0 | . * 100 | round / 100')
+  echo "$(( (SECONDS - TASK_STARTED) / 60 ))m, \$$cost"
+}
+wt_git() { git -C "$WT" "$@"; }
+
+# ---------------------------------------------------------------------------
+# Worktree
+
+setup_worktree() {
+  if [[ ! -d $WT ]]; then
+    mkdir -p "$(dirname "$WT")"
+    if git -C "$REPO" show-ref --verify --quiet "refs/heads/$WORK_BRANCH"; then
+      git -C "$REPO" worktree add -q "$WT" "$WORK_BRANCH"
+    else
+      git -C "$REPO" worktree add -q -b "$WORK_BRANCH" "$WT" "$BASE_BRANCH"
+    fi
+    log "worktree: $WT ($WORK_BRANCH)"
+  fi
+  clean_worktree
+
+  compgen -G "$WT/$TASKS_GLOB" >/dev/null \
+    || die "no task specs matching $TASKS_GLOB on $WORK_BRANCH — commit them to $BASE_BRANCH first"
+  if declare -F project_setup >/dev/null; then
+    project_setup "$WT" || die "project_setup failed (see $PROJECT_DIR/config.sh)"
+  fi
+}
+
+# Drop everything uncommitted (ignored files such as vendor/ and .env survive).
+clean_worktree() {
+  wt_git reset -q --hard HEAD
+  wt_git clean -q -fd
+}
+
+# ---------------------------------------------------------------------------
+# Agents
+
+write_settings() {
+  local extra
+  local ro=(
+    "Read" "Glob" "Grep" "WebSearch" "WebFetch"
+    "Bash(git diff *)" "Bash(git diff)" "Bash(git status *)" "Bash(git status)"
+    "Bash(git log *)" "Bash(git show *)" "Bash(ls *)" "Bash(grep *)" "Bash(wc *)"
+    "Bash(cat *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)" "Bash(awk *)"
+    "Bash(sort *)" "Bash(uniq *)" "Bash(diff *)" "Bash(test *)"
+    "Bash($BIN/checks)" "Bash($BIN/checks *)" "Bash($BIN/scratch *)"
+  )
+  for extra in "${AGENT_BASH[@]}"; do ro+=("Bash($extra)"); done
+  local deny=(
+    "Bash(git commit *)" "Bash(git push *)" "Bash(git reset *)" "Bash(git checkout *)"
+    "Bash(git stash *)" "Bash(git switch *)" "Bash(git rebase *)"
+  )
+  for extra in "${DENY_BASH[@]}"; do deny+=("Bash($extra)"); done
+  local impl=("${ro[@]}" "Edit" "Write" "Write(//tmp/agentic-*/**)" "Edit(//tmp/agentic-*/**)")
+  for extra in "${IMPLEMENTER_EXTRA_BASH[@]}"; do impl+=("Bash($extra)"); done
+  local val=("${ro[@]}")
+  for extra in "${VALIDATOR_EXTRA_BASH[@]}"; do val+=("Bash($extra)"); done
+
+  settings() { jq -n --argjson deny "$1" '{permissions: {allow: $ARGS.positional, deny: $deny}}' --args "${@:2}"; }
+  local deny_json; deny_json=$(printf '%s\n' "${deny[@]}" | jq -R . | jq -s .)
+  local deny_ro; deny_ro=$(jq '. + ["Edit", "Write", "NotebookEdit"]' <<<"$deny_json")
+  settings "$deny_ro" "${ro[@]}" > "$RUN_DIR/settings-planner.json"
+  settings "$deny_json" "${impl[@]}" > "$RUN_DIR/settings-implementer.json"
+  settings "$deny_ro" "${val[@]}" > "$RUN_DIR/settings-validator.json"
+}
+
+# run_agent ROLE PROMPT_FILE OUT_PREFIX [claude args…]
+# On success writes OUT_PREFIX.json (the structured output) and returns 0.
+run_agent() {
+  local role=$1 prompt=$2 out=$3; shift 3
+  local model_var="${role^^}_MODEL"
+  local args=(
+    -p --output-format stream-json --verbose
+    --append-system-prompt-file "$AGENTIC_DIR/prompts/$role.md"
+    --json-schema "$(cat "$AGENTIC_DIR/schemas/$role.json")"
+    --settings "$RUN_DIR/settings-$role.json"
+    --max-budget-usd "$AGENT_BUDGET_USD"
+    "$@"
+  )
+  [[ -n ${!model_var:-} ]] && args+=(--model "${!model_var}")
+
+  log "  → $role"
+  local rc=0 started=$SECONDS
+  (cd "$WT" && timeout "$AGENT_TIMEOUT" claude "${args[@]}" <"$prompt" >"$out.jsonl" 2>"$out.stderr") || rc=$?
+
+  jq -c 'select(.type == "result")' "$out.jsonl" 2>/dev/null | tail -n 1 >"$out.result.json" || true
+  local cost; cost=$(jq -r '.total_cost_usd // 0' "$out.result.json" 2>/dev/null || echo 0)
+
+  if jq -e '.structured_output' "$out.result.json" >/dev/null 2>&1; then
+    jq '.structured_output' "$out.result.json" >"$out.json"
+    log "  ← $role ok ($(( (SECONDS - started) / 60 ))m, \$$(printf '%.2f' "$cost"))"
+    return 0
+  fi
+  log "  ✗ $role failed (exit $rc, $(( (SECONDS - started) / 60 ))m) — see ${out#"$REPO"/}.*"
+  return 1
+}
+
+# Owner-wide acceptance criteria (config STANDING_CRITERIA), added to every task.
+standing_criteria() {
+  [[ -n ${STANDING_CRITERIA:-} && -f $STANDING_CRITERIA ]] || return 0
+  echo
+  echo "## Standing acceptance criteria — part of the definition of done for every task"
+  echo
+  sed '1{/^# /d}' "$STANDING_CRITERIA"
+}
+
+# Project context (config AGENT_CONTEXT) + the pipeline's own rules for agents.
+tools_hint() {
+  if [[ -n ${AGENT_CONTEXT:-} && -f $AGENT_CONTEXT ]]; then
+    sed "s#{{PROJECT_BIN}}#$PROJECT_BIN#g" "$AGENT_CONTEXT"
+    echo
+  fi
+  cat <<EOF
+## Pipeline rules
+
+- Write everything meant for humans (summaries, user-facing text) in $LANGUAGE.
+- Full quality gate: \`$BIN/checks\` — run it before you finish.
+- Scratch files never go in the worktree (everything in it gets committed). Get a dir with
+  \`$BIN/scratch new <name>\` (prints \`/tmp/agentic-<name>-XXXXXX\`) and create files in it with the
+  **Write tool** (implementer). Don't clean up — the pipeline removes /tmp/agentic-* dirs and
+  agentic-* docker images after every task.
+- Permission rules match one plain command per Bash call. Compound commands (\`cd … && …\`, \`;\`),
+  \`\$(…)\` in paths, shell redirects to files and \`git -C\` are denied — you are already in the
+  worktree, so run git and scripts directly and use the Edit/Write tools for files.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Committer (deterministic — no LLM)
+
+commit_task() {
+  local id=$1 title spec summary manual
+  title=$(q get "$id" title); spec=$(q get "$id" path)
+  summary=$(jq -r '.summary' "$TASK_RUN/implementer.json")
+  manual=$(jq -r '[(.manual_checks // [])[]] | join("; ")' "$TASK_RUN/validator.json")
+
+  # Plans go to plans/ next to the specs — outside TASKS_GLOB, so they are not tasks.
+  mkdir -p "$WT/$(dirname "$spec")/plans"
+  cp "$TASK_RUN/plan.md" "$WT/$(dirname "$spec")/plans/$(basename "$spec")"
+  q set "$id" status done
+  if [[ -n $manual ]]; then
+    progress "$id" partial "$summary $MSG_MANUAL: $manual."
+  else
+    progress "$id" done "$summary"
+  fi
+
+  wt_git add -A
+  local msg=("-m" "Epic $id: $title" "-m" "$summary")
+  [[ -n $manual ]] && msg+=("-m" "Manual checks: $manual")
+  msg+=("-m" "Pipeline run: $RUN_ID" "-m" "$COMMIT_TRAILER")
+  wt_git commit -q "${msg[@]}"
+  log "  ✅ $id committed ($(wt_git rev-parse --short HEAD))${manual:+ — manual checks listed}"
+  notify "$([[ -n $manual ]] && echo 🟡 || echo ✅) $id $title — $(task_stats)${manual:+
+$MSG_MANUAL: $manual}"
+  echo "$([[ -n $manual ]] && echo 🟡 || echo ✅) $id $title" >>"$RUN_DIR/results.txt"
+}
+
+fail_task() {
+  local id=$1 reason
+  reason=$(tr '\n' ' ' <<<"$2" | cut -c1-400)
+  log "  🛑 $id needs human: $reason"
+  notify "🛑 $id $(q get "$id" title) — $(task_stats)
+$reason"
+
+  wt_git add -A
+  wt_git diff --cached --binary >"$TASK_RUN/last-attempt.patch"
+  [[ -s $TASK_RUN/last-attempt.patch ]] || rm -f "$TASK_RUN/last-attempt.patch"
+  clean_worktree
+
+  local logs="${RUNS_DIR#"$REPO"/}/$RUN_ID/$id/"
+  q set "$id" status needs-human
+  q set "$id" reason "$reason"
+  progress "$id" needs-human "$MSG_NEEDS_HUMAN: $reason ($MSG_LOGS: \`$logs\`)."
+  wt_git add -A
+  wt_git commit -q -m "Epic $id: needs human" -m "$reason" -m "Pipeline run: $RUN_ID" -m "$COMMIT_TRAILER"
+  echo "🛑 $id — $reason" >>"$RUN_DIR/results.txt"
+}
+
+# ---------------------------------------------------------------------------
+# One task through the whole pipeline
+
+process_task() {
+  local id=$1 title spec
+  title=$(q get "$id" title); spec=$(q get "$id" path)
+  log "▶ $id $title"
+  clean_worktree
+
+  # 1. Planner — plan mode, read-only.
+  {
+    echo "# Task $id: $title"
+    echo
+    echo "Spec: \`$spec\` — read it first; its acceptance criteria are the definition of done."
+    echo "Produce the implementation plan for this task."
+    standing_criteria
+    echo
+    tools_hint
+  } >"$TASK_RUN/planner.prompt.md"
+  if ! run_agent planner "$TASK_RUN/planner.prompt.md" "$TASK_RUN/planner" \
+      --permission-mode plan --tools "Read,Glob,Grep,Bash,WebSearch,WebFetch"; then
+    fail_task "$id" "planner crashed or timed out"; return
+  fi
+  if [[ $(jq -r .status "$TASK_RUN/planner.json") == needs_human ]]; then
+    fail_task "$id" "planner: $(jq -r '.reason // .plan' "$TASK_RUN/planner.json")"; return
+  fi
+  jq -r .plan "$TASK_RUN/planner.json" >"$TASK_RUN/plan.md"
+
+  # 2–3. Implementer ⇄ checks ⇄ validator, up to MAX_ATTEMPTS implementer runs.
+  local attempt feedback="" before
+  for (( attempt = 1; attempt <= MAX_ATTEMPTS; attempt++ )); do
+    {
+      echo "# Task $id: $title — attempt $attempt of $MAX_ATTEMPTS"
+      echo
+      echo "Spec: \`$spec\` — read it; its acceptance criteria are the definition of done."
+      standing_criteria
+      echo
+      tools_hint
+      echo
+      echo "## Plan (from the planner)"
+      echo
+      cat "$TASK_RUN/plan.md"
+      if [[ -n $feedback ]]; then
+        echo
+        echo "## Feedback on your previous attempt — fix this"
+        echo
+        echo "Your previous changes are still in the worktree (\`git status\`, \`git diff HEAD\`)."
+        echo
+        echo "$feedback"
+      fi
+    } >"$TASK_RUN/implementer-$attempt.prompt.md"
+
+    if ! run_agent implementer "$TASK_RUN/implementer-$attempt.prompt.md" "$TASK_RUN/implementer-$attempt" \
+        --permission-mode acceptEdits --tools "Read,Glob,Grep,Edit,Write,Bash,WebSearch,WebFetch"; then
+      feedback="The previous attempt crashed or timed out before finishing. Check what is already done and complete the task."
+      continue
+    fi
+    cp "$TASK_RUN/implementer-$attempt.json" "$TASK_RUN/implementer.json"
+    if [[ $(jq -r .status "$TASK_RUN/implementer.json") == needs_human ]]; then
+      fail_task "$id" "implementer: $(jq -r '.reason // .summary' "$TASK_RUN/implementer.json")"; return
+    fi
+
+    wt_git add -A
+    if wt_git diff --cached --quiet; then
+      feedback="You reported done, but the worktree has no changes at all. Implement the task."
+      continue
+    fi
+
+    log "  → checks"
+    if ! "$BIN/checks" >"$TASK_RUN/checks-$attempt.log" 2>&1; then
+      log "  ✗ checks failed"
+      feedback="Automated checks failed (\`$BIN/checks\`). Output (tail):"$'\n\n```\n'"$(tail -c 6000 "$TASK_RUN/checks-$attempt.log")"$'\n```'
+      continue
+    fi
+    log "  ← checks passed"
+
+    {
+      echo "# Validate task $id: $title"
+      echo
+      echo "Spec: \`$spec\` — check every acceptance criterion."
+      standing_criteria
+      echo
+      echo "Report each standing criterion above as its own entry in \`ac_results\`."
+      echo "The change is staged: \`git diff --cached\`."
+      echo
+      tools_hint
+      echo
+      echo "## Automated checks (passed)"
+      echo
+      echo '```'
+      grep '^:::' "$TASK_RUN/checks-$attempt.log"
+      echo '```'
+      echo
+      echo "## Implementer's report"
+      echo
+      jq -r '"Summary: \(.summary)\n\nDeviations from plan: \(.deviations // "none")\n\nManual checks claimed: \((.manual_checks // []) | join("; "))"' "$TASK_RUN/implementer.json"
+      echo
+      echo "## Plan it followed"
+      echo
+      cat "$TASK_RUN/plan.md"
+    } >"$TASK_RUN/validator-$attempt.prompt.md"
+
+    before=$(tree_state)
+    if ! run_agent validator "$TASK_RUN/validator-$attempt.prompt.md" "$TASK_RUN/validator-$attempt" \
+        --permission-mode manual --tools "Read,Glob,Grep,Bash,WebSearch,WebFetch"; then
+      fail_task "$id" "validator crashed or timed out"; return
+    fi
+    if [[ $(tree_state) != "$before" ]]; then
+      log "  ! validator changed the worktree — restoring the implementer's version"
+      wt_git checkout -q -- . && wt_git clean -q -fd
+    fi
+    cp "$TASK_RUN/validator-$attempt.json" "$TASK_RUN/validator.json"
+
+    case $(jq -r .verdict "$TASK_RUN/validator.json") in
+      pass) commit_task "$id"; return ;;
+      needs_human) fail_task "$id" "validator: $(jq -r '.reason // .feedback' "$TASK_RUN/validator.json")"; return ;;
+      *)
+        log "  ✗ validation failed"
+        feedback="The independent validator rejected the change:"$'\n\n'"$(jq -r '.feedback' "$TASK_RUN/validator.json")"$'\n\n'"Criteria not met:"$'\n'"$(jq -r '.ac_results[] | select(.status == "not_met") | "- \(.ac): \(.evidence)"' "$TASK_RUN/validator.json")"
+        ;;
+    esac
+  done
+
+  fail_task "$id" "no passing result after $MAX_ATTEMPTS attempts; last feedback: $(head -c 300 <<<"$feedback")"
+}
+
+# Total spent in this run, from every agent's result message.
+run_cost() {
+  cat "$RUN_DIR"/*/*.result.json 2>/dev/null | jq -s '[.[].total_cost_usd // 0] | add // 0 | . * 100 | round / 100'
+}
+
+tree_state() { { wt_git status --porcelain=v1 -uall; wt_git diff; } | sha1sum; }
+
+# ---------------------------------------------------------------------------
+# Reporting
+
+print_summary() {
+  local blocked
+  blocked=$(q blocked | awk -F'\t' '{ printf "⛔ %s — blocked by %s\n", $1, $2 }')
+  {
+    echo
+    echo "=== Run $RUN_ID: $(( (SECONDS - RUN_STARTED) / 60 )) min, \$$(run_cost) ==="
+    [[ -s $RUN_DIR/results.txt ]] && cat "$RUN_DIR/results.txt"
+    [[ -n $blocked ]] && echo "$blocked"
+    [[ -s $RUN_DIR/results.txt ]] || echo "(no tasks processed)"
+    echo "Worktree: $WT  ·  branch: $WORK_BRANCH  ·  logs: ${RUNS_DIR#"$REPO"/}/$RUN_ID/"
+  } | tee "$RUN_DIR/summary.txt"
+}
+
+push_branch() {
+  (( OPEN_PR && ! NO_PR )) || return 1
+  [[ -n $(wt_git log --oneline "$BASE_BRANCH..$WORK_BRANCH") ]] || return 1
+  wt_git push -q -u origin "$WORK_BRANCH" 2>/dev/null \
+    || { log "! push failed — push manually: git push -u origin $WORK_BRANCH"; return 1; }
+}
+
+publish() {
+  log "push $WORK_BRANCH"
+  push_branch || return 0
+
+  {
+    echo "$PR_INTRO"
+    echo
+    echo "Pipeline run: \`$RUN_ID\`"
+    echo
+    q table
+    echo
+    echo "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+  } >"$RUN_DIR/pr-body.md"
+
+  local url
+  if url=$(cd "$WT" && gh pr view "$WORK_BRANCH" --json url -q .url 2>/dev/null); then
+    (cd "$WT" && gh pr edit "$WORK_BRANCH" --body-file "$RUN_DIR/pr-body.md" >/dev/null) \
+      && log "PR updated: $url" || log "! gh pr edit failed"
+  elif url=$(cd "$WT" && gh pr create --base "$BASE_BRANCH" --head "$WORK_BRANCH" \
+      --title "$PR_TITLE" --body-file "$RUN_DIR/pr-body.md" 2>&1); then
+    log "PR opened: $url"
+  else
+    log "! gh pr create failed ($url) — open the PR manually for $WORK_BRANCH"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+
+cmd_run() {
+  mkdir -p "$RUNS_DIR"
+  exec 9>"$RUNS_DIR/.lock-epic-$EPIC"
+  flock -n 9 || die "another run for epic $EPIC is in progress"
+
+  RUN_ID=$(date +%Y%m%d-%H%M%S)
+  RUN_DIR="$RUNS_DIR/$RUN_ID"
+  RUN_STARTED=$SECONDS
+  mkdir -p "$RUN_DIR"
+  exec > >(tee -a "$RUN_DIR/pipeline.log") 2>&1
+  trap 'log "interrupted"; print_summary; notify "⏹ run $RUN_ID interrupted"; exit 130' INT TERM
+
+  setup_worktree
+  write_settings
+  log "run $RUN_ID · epic $EPIC · $(q list | wc -l) tasks · budget \$$RUN_BUDGET_USD"
+  notify "▶ epic $EPIC: run started, $(q list | awk -F'\t' '$2 == "todo"' | wc -l) tasks to do"
+
+  local id processed=0
+  while :; do
+    if awk -v a="$(run_cost)" -v b="$RUN_BUDGET_USD" 'BEGIN { exit !(a >= b) }'; then
+      log "run budget reached (\$$(run_cost)) — stopping"
+      notify "💸 run budget reached (\$$(run_cost)) — stopping"; break
+    fi
+    (( MAX_TASKS && processed >= MAX_TASKS )) && break
+    if [[ -n $ONLY ]]; then
+      (( processed )) && break
+      [[ $(q get "$ONLY" status) == todo ]] || die "$ONLY is $(q get "$ONLY" status), not todo (use retry)"
+      id=$ONLY
+    else
+      id=$(q next)
+    fi
+    [[ -n $id ]] || break
+    [[ $id != "${last_id:-}" ]] || die "$id was picked twice in a row — queue state is not advancing"
+    last_id=$id
+
+    # Each task runs in a subshell with errexit on, so an unexpected error ends
+    # that task (→ needs-human) instead of the whole unattended run.
+    TASK_RUN="$RUN_DIR/$id"; mkdir -p "$TASK_RUN"; TASK_STARTED=$SECONDS
+    local rc=0
+    set +e; ( set -e; process_task "$id" ); rc=$?; set -e
+    "$BIN/scratch" clean >/dev/null 2>&1 || true
+    (( PUSH_EACH_TASK )) && push_branch || true
+    if (( rc )) && [[ $(q get "$id" status) == todo ]]; then
+      log "  ! pipeline error in $id (exit $rc)"
+      fail_task "$id" "pipeline error (exit $rc) — see ${RUNS_DIR#"$REPO"/}/$RUN_ID/pipeline.log"
+    fi
+    processed=$(( processed + 1 ))
+  done
+
+  print_summary
+  publish
+  local web; web=$(web_url)
+  notify "🏁 $(cat "$RUN_DIR/summary.txt")${web:+
+$web/compare/$BASE_BRANCH...$WORK_BRANCH}"
+}
+
+cmd_status() {
+  [[ -d $WT ]] || WT=$REPO
+  echo "Queue in $WT"
+  q list | awk -F'\t' '{ printf "%-6s %-12s deps: %-14s %s\n", $1, $2, ($3 == "" ? "-" : $3), $4 }'
+  q blocked | awk -F'\t' '{ printf "⛔ %s blocked by %s\n", $1, $2 }'
+  local next; next=$(q next); echo "next: ${next:-none}"
+}
+
+latest_run() { ls -td "$RUNS_DIR"/2*/ 2>/dev/null | head -n 1; }
+
+# Follows the active run; with none active, shows the last summary and waits
+# for the next `run` to start (so watch can be opened before or after it).
+cmd_watch() {
+  mkdir -p "$RUNS_DIR"
+  local run; run=$(latest_run)
+  if flock -n "$RUNS_DIR/.lock-epic-$EPIC" true; then
+    if [[ -n $run ]]; then
+      echo "No run in progress for epic $EPIC. Last run: ${run#"$REPO"/}"
+      cat "$run/summary.txt" 2>/dev/null
+    fi
+    echo
+    echo "Waiting for a new run… (start it with: agentic run --epic $EPIC; Ctrl-C to stop)"
+    while [[ $(latest_run) == "$run" ]]; do sleep 2; done
+    run=$(latest_run)
+  fi
+  exec python3 "$AGENTIC_DIR/lib/watch.py" "$run" "$WT"
+}
+
+cmd_retry() {
+  [[ -n $ONLY ]] || die "retry needs --only <id>"
+  [[ -d $WT ]] || die "no worktree at $WT"
+  clean_worktree
+  q set "$ONLY" status todo
+  q set "$ONLY" reason ""
+  progress "$ONLY" todo "$MSG_RETRY"
+  wt_git add -A
+  wt_git commit -q -m "Epic $ONLY: retry" -m "$COMMIT_TRAILER"
+  echo "$ONLY → todo"
+}
+
+case $CMD in
+  run) cmd_run ;;
+  status) cmd_status ;;
+  watch) cmd_watch ;;
+  retry) cmd_retry ;;
+  *) usage ;;
+esac

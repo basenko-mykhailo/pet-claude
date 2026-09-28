@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Deterministic quality gate: runs every CHECKS entry from the project config
+# (a shell command each) from the worktree root; non-zero if any fails.
+# Agents run it themselves before finishing; the pipeline runs it again.
+set -uo pipefail
+
+# shellcheck source=../lib/project.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/project.sh"
+WT=${AGENTIC_WT:-$(git rev-parse --show-toplevel)}
+cd "$WT"
+
+fail=0
+for cmd in "${CHECKS[@]}"; do
+  echo "::: $cmd"
+  if bash -c "$cmd" 2>&1; then
+    echo "::: OK   $cmd"
+  else
+    echo "::: FAIL $cmd"
+    fail=1
+  fi
+done
+
+if (( fail )); then echo "::: CHECKS FAILED"; else echo "::: ALL CHECKS PASSED"; fi
+exit $fail
