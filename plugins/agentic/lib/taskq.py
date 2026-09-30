@@ -31,6 +31,25 @@ READY_DEPS = {"done"}
 STUCK = {"needs-human"}
 
 
+def write_atomic(path: str, text: str) -> None:
+    """Replace the file only once the new content is fully written: a failed write
+    (e.g. an encoding error) must not leave a spec or the progress log truncated."""
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def from_argv(value: str) -> str:
+    """Argv bytes that aren't valid UTF-8 (text cut mid-letter) arrive as surrogate
+    escapes that can't be written back; turn them into U+FFFD instead."""
+    return value.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def id_key(task_id: str) -> tuple:
     return tuple(int(p) if p.isdigit() else p for p in task_id.split("."))
 
@@ -88,8 +107,7 @@ class Task:
                 v = "[" + ", ".join(v) + "]"
             lines.append(f"{k}: {v}".rstrip())
         self.text = "---\n" + "\n".join(lines) + "\n---\n" + self.body
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write(self.text)
+        write_atomic(self.path, self.text)
 
 
 class Queue:
@@ -165,8 +183,7 @@ def update_progress(root: str, progress_rel: str, q: Queue, task: Task, emoji: s
         count=1,
         flags=re.M,
     )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
+    write_atomic(path, content)
 
 
 def main() -> None:
@@ -213,9 +230,9 @@ def main() -> None:
         t = q.get(args.id)
         print({"path": t.rel, "title": t.title, "status": t.status, "reason": t.meta.get("reason", "")}[args.field])
     elif args.cmd == "set":
-        q.get(args.id).set(args.key, " ".join(args.value.split()))
+        q.get(args.id).set(args.key, " ".join(from_argv(args.value).split()))
     elif args.cmd == "progress":
-        update_progress(args.root, args.file, q, q.get(args.id), EMOJI[args.state], args.text, args.spec_label)
+        update_progress(args.root, args.file, q, q.get(args.id), EMOJI[args.state], from_argv(args.text), args.spec_label)
 
 
 if __name__ == "__main__":

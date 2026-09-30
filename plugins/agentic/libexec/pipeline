@@ -115,7 +115,9 @@ write_settings() {
     # --add-dir: an extra working dir would open $PROJECT_BIN to the implementer's shell writes.
     "Read(/$PROJECT_BIN/**)" "Read(//tmp/agentic-*/**)"
     "Bash(git diff *)" "Bash(git diff)" "Bash(git status *)" "Bash(git status)"
-    "Bash(git log *)" "Bash(git show *)" "Bash(ls *)" "Bash(grep *)" "Bash(wc *)"
+    "Bash(git log *)" "Bash(git show *)" "Bash(git ls-files *)" "Bash(git ls-files)"
+    "Bash(git check-ignore *)" "Bash(git rev-parse *)" "Bash(git blame *)"
+    "Bash(ls *)" "Bash(grep *)" "Bash(wc *)"
     "Bash(cat *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)" "Bash(awk *)"
     "Bash(sort *)" "Bash(uniq *)" "Bash(diff *)" "Bash(test *)"
     "Bash($BIN/checks)" "Bash($BIN/checks *)" "Bash($BIN/scratch *)"
@@ -224,7 +226,8 @@ $MSG_MANUAL: $manual}"
 
 fail_task() {
   local id=$1 reason
-  reason=$(tr '\n' ' ' <<<"$2" | cut -c1-400)
+  reason=$(tr '\n' ' ' <<<"$2")
+  reason=${reason:0:400}  # characters; `cut -c` counts bytes and splits Cyrillic letters
   log "  🛑 $id needs human: $reason"
   notify "🛑 $id $(q get "$id" title) — $(task_stats)
 $reason"
@@ -400,8 +403,8 @@ push_branch() {
 }
 
 publish() {
-  log "push $WORK_BRANCH"
   push_branch || return 0
+  log "pushed $WORK_BRANCH"
 
   {
     echo "$PR_INTRO"
@@ -437,6 +440,7 @@ cmd_run() {
   RUN_DIR="$RUNS_DIR/$RUN_ID"
   RUN_STARTED=$SECONDS
   mkdir -p "$RUN_DIR"
+  echo "$EPIC" >"$RUN_DIR/epic"  # for latest_run: runs of all epics share RUNS_DIR
   exec > >(tee -a "$RUN_DIR/pipeline.log") 2>&1
   trap 'log "interrupted"; print_summary; notify "⏹ run $RUN_ID interrupted"; exit 130' INT TERM
 
@@ -492,7 +496,17 @@ cmd_status() {
   local next; next=$(q next); echo "next: ${next:-none}"
 }
 
-latest_run() { ls -td "$RUNS_DIR"/2*/ 2>/dev/null | head -n 1; }
+# Newest run of $EPIC. A run records its epic in `epic`; older runs only in the log's header line.
+latest_run() {
+  local runs=("$RUNS_DIR"/2*/) i
+  for (( i = ${#runs[@]} - 1; i >= 0; i-- )); do
+    [[ -d ${runs[i]} ]] || continue
+    if [[ $(cat "${runs[i]}epic" 2>/dev/null) == "$EPIC" ]] \
+      || grep -qF " · epic $EPIC · " "${runs[i]}pipeline.log" 2>/dev/null; then
+      echo "${runs[i]}"; return
+    fi
+  done
+}
 
 # Follows the active run; with none active, shows the last summary and waits
 # for the next `run` to start (so watch can be opened before or after it).

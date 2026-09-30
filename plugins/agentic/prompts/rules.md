@@ -16,6 +16,8 @@ another tool.
 - `|`, `&&` and `;` split a command into parts, and every part must be allowed on its own. Several
   simple calls beat one compound call. Long inline scripts (multi-line quoted code, escaped quotes
   or braces) can be refused as too complex to check — put such a script in a scratch file.
+- The exit code and stderr come back with every result: don't append `; echo $?` or
+  `echo "exit=$?"` — `echo` isn't allowed, so the whole command is refused.
 - Quote arguments that contain `|`, `*`, `?`, `(`, `;`, `&` or spaces: `--filter='A|B'`,
   `-k 'a or b'`. Unquoted, `A|B` is a pipe into a command `B` — refused, and broken anyway.
 - `$(…)`, backticks and `git -C` are refused. Don't `cd`: you start in the worktree, a `cd` sticks
