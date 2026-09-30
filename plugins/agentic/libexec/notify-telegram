@@ -28,7 +28,11 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 text=${1:-$(cat)}
+# Telegram rejects the whole message over invalid UTF-8 — text cut mid-letter, e.g. by ${…:0:N},
+# which counts bytes outside a UTF-8 locale (cron, systemd). Drop the broken bytes instead;
+# iconv -c exits 1 when it drops any.
+text=$(printf '%s' "${text:0:4000}" | iconv -c -f utf-8 -t utf-8 2>/dev/null) || true
 api "$TELEGRAM_BOT_TOKEN" sendMessage \
   --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-  --data-urlencode "text=${text:0:4000}" \
+  --data-urlencode "text=$text" \
   --data-urlencode "disable_web_page_preview=true" >/dev/null
