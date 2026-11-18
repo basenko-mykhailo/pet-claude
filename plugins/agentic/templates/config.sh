@@ -65,6 +65,8 @@ MAX_ATTEMPTS=3                    # implementer runs per task (each failed check
 AGENT_TIMEOUT="60m"               # wall clock per agent call
 AGENT_BUDGET_USD={{AGENT_BUDGET}} # --max-budget-usd per agent call
 RUN_BUDGET_USD={{RUN_BUDGET}}     # stop picking new tasks once the run has spent this much
+LIMIT_MAX_WAIT_MIN=360            # API usage limit (429): wait for its reset up to this long per agent call;
+                                  # longer → the run stops and the task stays todo
 
 # --- Permissions ------------------------------------------------------------
 # On top of the tool's baseline (read-only shell, read-only git, reading $PROJECT_BIN, checks, scratch).

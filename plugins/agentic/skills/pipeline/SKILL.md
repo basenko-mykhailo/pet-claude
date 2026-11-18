@@ -21,6 +21,9 @@ description: Drive the agentic pipeline — the autonomous task-queue runner (pl
 - **`run` takes hours** and spawns its own `claude -p` agents. Start it detached — Bash with
   `run_in_background`, or `nohup agentic run --epic N >/dev/null 2>&1 &` — and don't wait on it. Progress:
   `agentic status`, the run log `.claude/agentic/runs/<run>/pipeline.log`, `summary.txt` at the end.
+- **⏸ means an API usage limit**, not a failure. In the log, the run is waiting for the reset and goes on
+  by itself. In a summary, the wait would have exceeded `LIMIT_MAX_WAIT_MIN`: the task is still `todo`, so
+  just `run` again after the reset — no `retry`.
 - **`watch` never exits** — it's for the user's terminal; tell them to run it there instead of calling it.
 - **`init` is an interview** that reads answers from the terminal: ask the user to type `! agentic init`,
   or run `agentic init --yes` (all defaults) and then adjust `.claude/agentic/config.sh` and `context.md`

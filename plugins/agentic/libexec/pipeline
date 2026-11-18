@@ -53,6 +53,11 @@ export AGENTIC_WT="$WT"
 : "${PROJECT_NAME:=$(basename "$REPO")}" "${PUSH_EACH_TASK:=1}"
 : "${PR_INTRO:=Automated implementation of epic $EPIC: one commit per task (planner → implementer → checks → independent validator).}"
 
+# Settings newer than some project configs.
+: "${LIMIT_MAX_WAIT_MIN:=360}"
+# Exit status of a task subshell whose agent hit an API usage limit it may not wait out (run_agent).
+EXIT_USAGE_LIMIT=75
+
 q() { python3 "$AGENTIC_DIR/lib/taskq.py" --root "$WT" --glob "$TASKS_GLOB" "$@"; }
 progress() { q progress "$1" "$2" "$3" --file "$PROGRESS_FILE" --spec-label "$MSG_SPEC"; }
 
@@ -143,8 +148,22 @@ write_settings() {
   settings "$deny_ro" "${val[@]}" > "$RUN_DIR/settings-validator.json"
 }
 
+# Epoch at which the API usage limit that ended session OUT_PREFIX resets (resetsAt of its rejected
+# rate_limit_event; 0 when it has none). Status 1 if the session did not end on a usage limit.
+limit_reset_at() {
+  jq -e '.api_error_status == 429 or .api_error == "usage_limit_reached"' "$1.result.json" >/dev/null 2>&1 \
+    || return 1
+  local reset
+  reset=$(jq -r 'select(.type == "rate_limit_event" and .rate_limit_info.status == "rejected")
+    | .rate_limit_info.resetsAt' "$1.jsonl" 2>/dev/null | tail -n 1) || true
+  if [[ $reset =~ ^[0-9]+$ ]]; then echo "$reset"; else echo 0; fi
+}
+
 # run_agent ROLE PROMPT_FILE OUT_PREFIX [claude args…]
 # On success writes OUT_PREFIX.json (the structured output) and returns 0.
+# An API usage limit (HTTP 429) is neither the agent's failure nor an attempt: wait for the reset and
+# start the same agent again. If the waits would add up to more than LIMIT_MAX_WAIT_MIN (the weekly
+# limit, say), exit the task subshell with EXIT_USAGE_LIMIT instead — the run stops, the task stays todo.
 run_agent() {
   local role=$1 prompt=$2 out=$3; shift 3
   local model_var="${role^^}_MODEL"
@@ -159,10 +178,40 @@ run_agent() {
   [[ -n ${!model_var:-} ]] && args+=(--model "${!model_var}")
 
   log "  → $role"
-  local rc=0 started=$SECONDS
-  (cd "$WT" && timeout "$AGENT_TIMEOUT" claude "${args[@]}" <"$prompt" >"$out.jsonl" 2>"$out.stderr") || rc=$?
+  local rc started=$SECONDS reset pause paused=0 when n=0 noted=0 ext
+  while :; do
+    rc=0
+    (cd "$WT" && timeout "$AGENT_TIMEOUT" claude "${args[@]}" <"$prompt" >"$out.jsonl" 2>"$out.stderr") || rc=$?
+    jq -c 'select(.type == "result")' "$out.jsonl" 2>/dev/null | tail -n 1 >"$out.result.json" || true
 
-  jq -c 'select(.type == "result")' "$out.jsonl" 2>/dev/null | tail -n 1 >"$out.result.json" || true
+    reset=$(limit_reset_at "$out") || break
+    # Keep the limited session's logs (its cost still counts in run_cost) out of the next one's way.
+    n=$(( n + 1 ))
+    for ext in jsonl stderr result.json; do mv "$out.$ext" "$out.limited-$n.$ext"; done
+    if (( reset > $(date +%s) )); then
+      pause=$(( reset - $(date +%s) + 60 ))
+      when="resets $(date -d "@$reset" '+%b %d %H:%M')"
+    else
+      pause=600 when="reset time unknown"  # no resetsAt: look again in 10 minutes
+    fi
+    if (( paused + pause > LIMIT_MAX_WAIT_MIN * 60 )); then
+      echo "API usage limit ($when), longer than LIMIT_MAX_WAIT_MIN=$LIMIT_MAX_WAIT_MIN" >"$TASK_RUN/stopped"
+      log "  ⏸ $role stopped by the API usage limit ($when) — ending the run"
+      exit "$EXIT_USAGE_LIMIT"
+    fi
+    log "  ⏸ $role stopped by the API usage limit ($when) — waiting until $(date -d "+$pause sec" +%H:%M)"
+    notify "⏸ ${TASK_RUN##*/} $role: API usage limit ($when), waiting until $(date -d "+$pause sec" +%H:%M)"
+    sleep "$pause"
+    paused=$(( paused + pause ))
+    # A session the limit cut off mid-work may have left changes behind; tell the implementer once.
+    if [[ $role == implementer ]] && (( !noted )) \
+        && jq -e '.total_cost_usd > 0' "$out.limited-$n.result.json" >/dev/null 2>&1; then
+      printf '\n## Note\n\n%s\n' "An API usage limit cut off an earlier session on this same prompt. Changes already in the worktree (\`git status\`, \`git diff HEAD\`) come from it: check them and finish the task." >>"$prompt"
+      noted=1
+    fi
+    log "  → $role (again, after the usage limit)"
+    started=$SECONDS
+  done
   local cost; cost=$(jq -r '.total_cost_usd // 0' "$out.result.json" 2>/dev/null || echo 0)
 
   if jq -e '.structured_output' "$out.result.json" >/dev/null 2>&1; then
@@ -224,6 +273,14 @@ $MSG_MANUAL: $manual}"
   echo "$([[ -n $manual ]] && echo 🟡 || echo ✅) $id $title" >>"$RUN_DIR/results.txt"
 }
 
+# Saves the task's uncommitted work as runs/…/<id>/last-attempt.patch, then drops it.
+save_attempt() {
+  wt_git add -A
+  wt_git diff --cached --binary >"$TASK_RUN/last-attempt.patch"
+  [[ -s $TASK_RUN/last-attempt.patch ]] || rm -f "$TASK_RUN/last-attempt.patch"
+  clean_worktree
+}
+
 fail_task() {
   local id=$1 reason
   reason=$(tr '\n' ' ' <<<"$2")
@@ -232,10 +289,7 @@ fail_task() {
   notify "🛑 $id $(q get "$id" title) — $(task_stats)
 $reason"
 
-  wt_git add -A
-  wt_git diff --cached --binary >"$TASK_RUN/last-attempt.patch"
-  [[ -s $TASK_RUN/last-attempt.patch ]] || rm -f "$TASK_RUN/last-attempt.patch"
-  clean_worktree
+  save_attempt
 
   local logs="${RUNS_DIR#"$REPO"/}/$RUN_ID/$id/"
   q set "$id" status needs-human
@@ -244,6 +298,18 @@ $reason"
   wt_git add -A
   wt_git commit -q -m "Epic $id: needs human" -m "$reason" -m "Pipeline run: $RUN_ID" -m "$COMMIT_TRAILER"
   echo "🛑 $id — $reason" >>"$RUN_DIR/results.txt"
+}
+
+# The task's agent hit a usage limit it may not wait out (EXIT_USAGE_LIMIT): the task stays todo for
+# the next `run`, its partial work goes to last-attempt.patch, and the caller ends the run.
+stop_on_limit() {
+  local id=$1 reason
+  reason=$(cat "$TASK_RUN/stopped" 2>/dev/null) || reason="API usage limit"
+  save_attempt
+  log "  ⏸ $id stays todo — run again after the reset: agentic run --epic $EPIC"
+  notify "⏸ $id $(q get "$id" title) — $(task_stats)
+$reason. Run stopped, $id stays todo."
+  echo "⏸ $id — $reason; stays todo" >>"$RUN_DIR/results.txt"
 }
 
 # ---------------------------------------------------------------------------
@@ -473,6 +539,9 @@ cmd_run() {
     local rc=0
     set +e; ( set -e; process_task "$id" ); rc=$?; set -e
     "$BIN/scratch" clean >/dev/null 2>&1 || true
+    if (( rc == EXIT_USAGE_LIMIT )); then
+      stop_on_limit "$id"; break
+    fi
     (( PUSH_EACH_TASK )) && push_branch || true
     if (( rc )) && [[ $(q get "$id" status) == todo ]]; then
       log "  ! pipeline error in $id (exit $rc)"
